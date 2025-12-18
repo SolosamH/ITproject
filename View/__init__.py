@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Model import GenerationModel, SolvingModel
 from View.components import Button, Dropdown, ModalHistory, ModalVictory
+from View.components.level_modals import ModalLevelSelect, ModalGameComplete
 from View.sprites import FloatingBanana, MonkeyIdle
 from View.utils import load_image, draw_shadow, draw_glass_card, draw_smooth_rect, try_load_font, calculate_button_size
 from View.particle import ParticleSystem
@@ -24,6 +25,31 @@ GENERATOR = "None" # DFS, Kruskal, Binary Tree, Wilson, Recursive Division
 MODE = None  # Easy, Medium, Hard
 MAZE_COLS, MAZE_ROWS = 25, 19
 CELL_GAP = 0  # khít nhau
+
+# Level system configuration
+LEVEL_CONFIGS = {
+    1: {
+        'name': 'Level 1',
+        'cols': 13,  # 25 - 12 (6 ô mỗi bên)
+        'rows': 7,   # 19 - 12 (6 ô mỗi bên)
+        'time_limit': 30,   # 30 giây
+        'extra_steps': 10,  # Dư 10 bước
+    },
+    2: {
+        'name': 'Level 2',
+        'cols': 19,  # 25 - 6 (3 ô mỗi bên)
+        'rows': 13,  # 19 - 6 (3 ô mỗi bên)
+        'time_limit': 90,   # 1 phút 30 giây
+        'extra_steps': 5,   # Dư 5 bước
+    },
+    3: {
+        'name': 'Level 3',
+        'cols': 25,  # Kích thước đầy đủ
+        'rows': 19,
+        'time_limit': 75,   # 1 phút 15 giây
+        'extra_steps': 3,   # Dư 3 bước
+    }
+}
 
 ASSETS = os.path.join(os.path.dirname(__file__), "assets")
 IMG = lambda name: os.path.join(ASSETS, name)
@@ -125,15 +151,74 @@ class App:
         self.start_time = None
         self.history = []
         self.game_won = False
+        
+        # Game difficulty and time limit
+        self.difficulty = "Medium"  # Easy, Medium, Hard
+        self.time_limits = {"Easy": 180, "Medium": 120, "Hard": 60}
+        self.time_limit = self.time_limits[self.difficulty]
+        self.time_remaining = self.time_limit
+        
+        # Collectibles (small bananas)
+        self.collectibles = []  # List of (x, y) positions
+        self.collected_count = 0
+        self.total_collectibles = 0
+        self.collectible_points = 10  # Points per collectible
+        
+        # Steps system (optimal path based)
+        self.steps = 0  # Current steps taken
+        self.max_steps = 0  # Maximum allowed steps (optimal + 3)
+        self.steps_remaining = 0  # Steps left
+        
+        # Level system
+        self.current_level = 1
+        self.max_level = 3
+        self.level_stats = {}  # Store stats for each level {level: {'time': str, 'steps': int, 'completed': bool}}
+        self.showing_level_select = False
+        self.showing_game_complete = False
+        self.unlocked_levels = {1}  # Only level 1 is unlocked initially
+        
+        # Coin system
+        self.coins = 0  # Current coins
+        self.auto_use_count = 0  # Number of times auto has been used
+        self.coin_reward_ratio = 0.6  # Earn coin if time_remaining > time_limit * 0.6
+        
+        # Transition effect system
+        self.transitioning = False
+        self.transition_progress = 0.0
+        self.transition_duration = 1.2  # seconds - 2 pha (shrink + expand)
+        self.transition_from = None
+        self.transition_to = None
+        self.transition_surface_from = None
+        self.transition_surface_to = None
+        
         self.modal_history = ModalHistory(lambda: self.history)
-        self.modal_victory = ModalVictory(self.restart_level)
+        self.modal_victory = ModalVictory(self.restart_level, self.next_level)
         self.modal_victory.win_restart_img = self.btn_assets['win_restart']
+        self.modal_level_select = ModalLevelSelect(self.start_level)
+        self.modal_game_complete = ModalGameComplete(self.back_to_menu)
+        
+        # Cached small banana image
+        self.small_banana_cache = None
+        self.small_banana_size_cache = 0
+        
+        # Cached glow and rotation surfaces for bananas (performance optimization)
+        self.banana_glow_cache = []  # List of pre-rendered glow surfaces
+        self.banana_rotation_cache = {}  # Dict of angle -> rotated surface
+        self.banana_last_cache_size = 0
         
         # Maze generation animation
         self.generating_maze = False
         self.generation_model = None
         self.generation_timer = 0.0
-        self.generation_speed = 0.01  # Seconds per step (tăng từ 0.003 lên 0.015 để chậm hơn, dễ quan sát)
+        self.generation_speed = 0.001  # Seconds per step (tối ưu: 0.001 để nhanh và mượt hơn)
+        
+        # Auto solve animation
+        self.solving_maze = False
+        self.solving_model = None
+        self.solution_path = []
+        self.solution_index = 0
+        self.solve_speed = 0.15  # Seconds per step
+        self.solve_timer = 0.0
         
         # Particle effects for wall breaking
         self.particle_system = ParticleSystem()
@@ -147,6 +232,11 @@ class App:
         # Window dragging state
         self.dragging = False
         self.drag_offset = (0, 0)
+
+        # Continuous movement state - cho phép giữ phím để di chuyển liên tục
+        self.key_hold_timer = 0
+        self.key_hold_delay = 0.15  # Delay giữa các bước di chuyển (seconds)
+        self.last_move_time = 0
 
         # Window controls - 3 nút ở góc trên phải
         btn_size = 48  # Kích thước nút - tăng lên
@@ -224,10 +314,6 @@ class App:
         auto_size = get_button_size(self.btn_assets['auto'], target_btn_w)
         half_btn_w = (target_btn_w - 8) // 2
         play_size = get_button_size(self.btn_assets['small'], half_btn_w)
-        # Generate button không dùng background image, tính kích thước dựa trên text
-        generate_w = target_btn_w
-        generate_h = 55  # Chiều cao cố định phù hợp với text
-        generate_size = (generate_w, generate_h)
         history_size = get_button_size(self.btn_assets['history'], target_btn_w)
         back_size = get_button_size(self.btn_assets['back'], target_btn_w)
 
@@ -254,52 +340,31 @@ class App:
         self.btn_pause = Button((play_start_x + play_size[0] + 8, cur_y, play_size[0], play_size[1]), "", 
                                self.font_ui, self.toggle_play, theme='yellow', 
                                bg_image=self.btn_assets['small'], keep_aspect=True)
-        cur_y += play_size[1] + row_spacing + 5  # Thêm khoảng cách trước dropdown
+        cur_y += play_size[1] + row_spacing + 5
 
-        # Dòng 4: Dropdown solving algorithm (căn giữa trong sidebar card)
-        dropdown_x = sidebar_card_x + (sidebar_card_w - target_btn_w) // 2
-        self.dropdown = Dropdown((dropdown_x, cur_y, target_btn_w, 42), self.font_small, 
-                                ["BFS","DFS","UCS","A*","Bidirectional"], 
-                                default_text="Solving Algorithm", 
-                                on_select=self.set_algo)
-        cur_y += 42 + row_spacing
-
-        # Dòng 5: Dropdown generation algorithm (căn giữa trong sidebar card)
-        self.maze_gen_dropdown = Dropdown((dropdown_x, cur_y, target_btn_w, 42), self.font_small, 
-                                         ["DFS", "Kruskal", "Binary Tree", "Wilson", "Recursive Div."], 
-                                         default_text="Generation Algorithm", 
-                                         on_select=self.set_generation_algo)
-        cur_y += 42 + row_spacing
-
-        # Dòng 6: Generate button (căn giữa trong sidebar card)
-        generate_x = sidebar_card_x + (sidebar_card_w - generate_size[0]) // 2
-        self.btn_generate = Button((generate_x, cur_y, generate_size[0], generate_size[1]), "Generate Maze", 
-                                  self.font_ui, self.generate_maze, theme='green', 
-                                  keep_aspect=False)  # Không keep aspect vì không có bg_image
-        cur_y += generate_size[1] + row_spacing + 5  # Thêm khoảng cách trước history/back
-
-        # Dòng 7: History button (căn giữa trong sidebar card)
+        # Dòng 4: History button (căn giữa trong sidebar card)
         history_x = sidebar_card_x + (sidebar_card_w - history_size[0]) // 2
         self.btn_history = Button((history_x, cur_y, history_size[0], history_size[1]), "", self.font_ui, 
                                  self.open_history, theme='purple', 
                                  bg_image=self.btn_assets['history'], keep_aspect=True)
         cur_y += history_size[1] + row_spacing
 
-        # Dòng 8: Back button (căn giữa trong sidebar card)
+        # Dòng 5: Back button (căn giữa trong sidebar card)
         back_x = sidebar_card_x + (sidebar_card_w - back_size[0]) // 2
         self.btn_back = Button((back_x, cur_y, back_size[0], back_size[1]), "", self.font_ui, 
                               self.goto_start, theme='red', 
                               bg_image=self.btn_assets['back'], keep_aspect=True)
 
-        # maze
-        self.MazeGenerated = GenerationModel(MAZE_COLS, MAZE_ROWS, GENERATOR).generate_maze()
+        # maze - use level 1 config for initial setup
+        level_config = LEVEL_CONFIGS[1]
+        self.MazeGenerated = GenerationModel(level_config['cols'], level_config['rows'], GENERATOR).generate_maze()
         self.maze = self.MazeGenerated
         self.player = [1,1]  # Khởi tạo từ (1,1) thay vì (0,0)
         self.prepare_sprites()
 
         # prebuild random floor map for repeatability
         random.seed(42)
-        self.floor_map = [[random.randrange(len(self.floor_tiles)) for _ in range(MAZE_COLS)] for _ in range(MAZE_ROWS)]
+        self.floor_map = [[random.randrange(len(self.floor_tiles)) for _ in range(level_config['cols'])] for _ in range(level_config['rows'])]
 
         # Cập nhật scale các nút game ngay sau khi khởi tạo
         self.update_game_buttons()
@@ -310,6 +375,9 @@ class App:
         if self._last_cell_size != cell:
             self.clear_size_dependent_cache()
             self._last_cell_size = cell
+            # Reset small banana cache when cell size changes
+            self.small_banana_cache = None
+            self.small_banana_size_cache = 0
 
         def scale_to_cell(img, ratio=0.9):
             w = h = int(cell*ratio)
@@ -360,50 +428,132 @@ class App:
         """Cập nhật kích thước và vị trí các nút game khi cửa sổ thay đổi"""
         # Scale sidebar width theo tỷ lệ cửa sổ
         scale_factor = min(self.window_rect.w / 1920, self.window_rect.h / 1080)
-        scale_factor = max(0.5, min(1.0, scale_factor))
+        scale_factor = max(0.5, min(1.5, scale_factor))  # Tăng max từ 1.2 lên 1.5 để cho phép to hơn nữa
 
         scaled_panel_w = int(RIGHT_PANEL_W * scale_factor)
-        scaled_panel_w = max(240, scaled_panel_w)  # Tăng tối thiểu lên 240px
+        scaled_panel_w = max(180, min(scaled_panel_w, 650))  # Giảm tối thiểu từ 240 xuống 180px
 
         # Tính toán vị trí sidebar và margin
         sidebar_left = self.window_rect.w - scaled_panel_w
         
         # Tính toán sidebar card thực tế (giống như trong draw_game)
         sidebar_card_margin = int(10 * scale_factor)  # Margin của sidebar card
+        sidebar_card_margin = max(2, sidebar_card_margin)  # Giảm margin xuống 2px khi màn hình nhỏ
         sidebar_card_x = sidebar_left + sidebar_card_margin
         sidebar_card_w = scaled_panel_w - (sidebar_card_margin * 2)
         
-        side_margin = int(10 * scale_factor)  # Margin các nút trong sidebar
-        side_margin = max(8, side_margin)  # Margin tối thiểu
-        cur_y = 120
-
-        # Chiều rộng các nút
-        target_btn_w = sidebar_card_w - (side_margin * 2)
-        row_spacing = max(6, int(8 * scale_factor))  # Giảm từ 10 xuống 8
+        side_margin = int(8 * scale_factor)  # Margin các nút trong sidebar  
+        side_margin = max(2, side_margin)  # Giảm margin tối thiểu xuống 2px khi màn hình rất nhỏ
         
-        # Chiều cao cố định cho tất cả các nút để đồng nhất
-        target_btn_h = int(85 * scale_factor)  
-        target_btn_h = max(70, target_btn_h)
+        # Tính chiều cao sidebar có sẵn
+        sidebar_height = self.window_rect.h - 70  # Chiều cao sidebar
+        
+        # Vị trí bắt đầu các nút - điều chỉnh theo chiều cao màn hình
+        cur_y_start = max(80, int(120 * scale_factor))  # Giảm xuống 80px khi màn hình nhỏ
+        
+        # Ước tính chiều cao time/step boxes
+        estimated_chip_h = max(40, int(100 * scale_factor))
+        estimated_chip_h = min(estimated_chip_h, 120)
+        
+        # Chiều cao khả dụng cho các nút (trừ đi time/step boxes và margins)
+        available_height = sidebar_height - cur_y_start - estimated_chip_h - 40  # 40px buffer
+        
+        cur_y = cur_y_start
+
+        # Chiều rộng các nút - KHÔNG VƯỢT QUÁ sidebar card
+        target_btn_w = sidebar_card_w - (side_margin * 2)
+        target_btn_w = max(80, min(target_btn_w, sidebar_card_w - 6))  # Giảm từ 100 xuống 80px, margin 6px
+        
+        # Chiều cao điều chỉnh theo kích thước màn hình - THU NHỎ KHI MÀN HÌNH NHỎ
+        target_btn_h = int(120 * scale_factor)  
+        target_btn_h = max(30, min(target_btn_h, 130))  # Giảm tối thiểu từ 40 xuống 30px
+        
+        # Tính tổng chiều cao cần thiết cho các nút
+        # 4 nút: restart + auto + history + back
+        total_elements_height = target_btn_h * 4
+        
+        # Tính spacing cần thiết
+        num_spaces = 3  # Số khoảng cách giữa 4 nút
+        min_spacing = 3  # Spacing tối thiểu
+        desired_spacing = max(4, int(12 * scale_factor))  # Spacing mong muốn: 4-12px
+        
+        # Thử với spacing mong muốn trước
+        required_height_desired = total_elements_height + (num_spaces * desired_spacing)
+        required_height_min = total_elements_height + (num_spaces * min_spacing)
+        
+        if required_height_desired <= available_height:
+            # Đủ chỗ với spacing lớn
+            row_spacing = desired_spacing
+        elif required_height_min <= available_height:
+            # Đủ chỗ với spacing vừa phải, tính toán spacing chính xác
+            row_spacing = int((available_height - total_elements_height) / num_spaces)
+            row_spacing = max(min_spacing, min(row_spacing, desired_spacing))
+        else:
+            # Không đủ chỗ, giảm chiều cao nút để có spacing tối thiểu
+            available_for_elements = available_height - (num_spaces * min_spacing)
+            reduction_ratio = available_for_elements / total_elements_height
+            
+            target_btn_h = int(target_btn_h * reduction_ratio * 0.95)  # 0.95 để có buffer
+            target_btn_h = max(22, target_btn_h)  # Tối thiểu 22px
+            
+            row_spacing = min_spacing  # Dùng spacing tối thiểu
 
         # Tính kích thước riêng cho từng nút trước
         restart_size_temp = calculate_button_size(self.btn_assets['restart'], target_height=target_btn_h)
         auto_size_temp = calculate_button_size(self.btn_assets['auto'], target_height=target_btn_h)
         
-        # Lấy chiều rộng lớn nhất để tất cả các nút restart và auto có cùng kích thước
+        # Lấy chiều rộng lớn nhất nhưng KHÔNG ĐƯỢC vượt quá target_btn_w
         max_width = max(restart_size_temp[0], auto_size_temp[0])
+        max_width = min(max_width, target_btn_w)  # Bắt buộc không vượt quá sidebar
+        
+        # Nếu nút vẫn quá rộng, giảm chiều cao để giảm chiều rộng (giữ tỷ lệ)
+        if max_width > target_btn_w:
+            # Tính lại chiều cao để chiều rộng vừa khít
+            ratio = restart_size_temp[0] / restart_size_temp[1] if restart_size_temp[1] > 0 else 1
+            target_btn_h = int(target_btn_w / ratio)
+            target_btn_h = max(25, target_btn_h)  # Tối thiểu 25px
+            restart_size_temp = calculate_button_size(self.btn_assets['restart'], target_height=target_btn_h)
+            auto_size_temp = calculate_button_size(self.btn_assets['auto'], target_height=target_btn_h)
+            max_width = min(max(restart_size_temp[0], auto_size_temp[0]), target_btn_w)
+        
         restart_size = (max_width, target_btn_h)
         auto_size = (max_width, target_btn_h)
         
-        # Generate button không dùng background image, tính kích thước dựa trên text
-        generate_w = target_btn_w
-        generate_h = int(50 * scale_factor)  # Giảm từ 55 xuống 50
-        generate_h = max(40, generate_h)  # Giảm từ 45 xuống 40
-        generate_size = (generate_w, generate_h)
-        history_size = calculate_button_size(self.btn_assets['history'], target_height=target_btn_h)
-        back_size = calculate_button_size(self.btn_assets['back'], target_height=target_btn_h)
+        # History và back buttons - giới hạn kích thước CHẶT CHẼ
+        history_size_temp = calculate_button_size(self.btn_assets['history'], target_height=target_btn_h)
+        history_width = min(history_size_temp[0], target_btn_w)
+        
+        # Nếu vẫn quá rộng, tính lại chiều cao
+        if history_size_temp[0] > target_btn_w:
+            ratio = history_size_temp[0] / history_size_temp[1] if history_size_temp[1] > 0 else 1
+            new_h = int(target_btn_w / ratio)
+            new_h = max(25, new_h)
+            history_size_temp = calculate_button_size(self.btn_assets['history'], target_height=new_h)
+            history_width = min(history_size_temp[0], target_btn_w)
+            history_size = (history_width, new_h)
+        else:
+            history_size = (history_width, target_btn_h)
+        
+        back_size_temp = calculate_button_size(self.btn_assets['back'], target_height=target_btn_h)
+        back_width = min(back_size_temp[0], target_btn_w)
+        
+        # Nếu vẫn quá rộng, tính lại chiều cao
+        if back_size_temp[0] > target_btn_w:
+            ratio = back_size_temp[0] / back_size_temp[1] if back_size_temp[1] > 0 else 1
+            new_h = int(target_btn_w / ratio)
+            new_h = max(25, new_h)
+            back_size_temp = calculate_button_size(self.btn_assets['back'], target_height=new_h)
+            back_width = min(back_size_temp[0], target_btn_w)
+            back_size = (back_width, new_h)
+        else:
+            back_size = (back_width, target_btn_h)
 
         # Dòng 1: Restart button (căn giữa trong sidebar card)
         restart_x = sidebar_card_x + (sidebar_card_w - restart_size[0]) // 2
+        restart_x = max(sidebar_card_x + side_margin, restart_x)  # Đảm bảo không tràn trái
+        # Đảm bảo không tràn phải
+        if restart_x + restart_size[0] > sidebar_card_x + sidebar_card_w - side_margin:
+            restart_x = sidebar_card_x + sidebar_card_w - side_margin - restart_size[0]
         self.btn_restart.rect = pygame.Rect(restart_x, cur_y, restart_size[0], restart_size[1])
         if self.btn_restart.bg_image:
             self.btn_restart.scaled_bg = pygame.transform.smoothscale(
@@ -412,38 +562,34 @@ class App:
 
         # Dòng 2: Auto button (căn giữa trong sidebar card)
         auto_x = sidebar_card_x + (sidebar_card_w - auto_size[0]) // 2
+        auto_x = max(sidebar_card_x + side_margin, auto_x)  # Đảm bảo không tràn trái
+        # Đảm bảo không tràn phải
+        if auto_x + auto_size[0] > sidebar_card_x + sidebar_card_w - side_margin:
+            auto_x = sidebar_card_x + sidebar_card_w - side_margin - auto_size[0]
         self.btn_auto.rect = pygame.Rect(auto_x, cur_y, auto_size[0], auto_size[1])
         if self.btn_auto.bg_image:
             self.btn_auto.scaled_bg = pygame.transform.smoothscale(
                 self.btn_auto.bg_image, auto_size)
         cur_y += auto_size[1] + row_spacing
 
-        # Dòng 3: Dropdown solving algorithm (căn giữa trong sidebar card)
-        dropdown_h = int(42 * scale_factor)
-        dropdown_h = max(35, dropdown_h)
-        dropdown_x = sidebar_card_x + (sidebar_card_w - target_btn_w) // 2
-        self.dropdown.rect = pygame.Rect(dropdown_x, cur_y, target_btn_w, dropdown_h)
-        cur_y += dropdown_h + row_spacing
-
-        # Dòng 4: Dropdown generation algorithm (căn giữa trong sidebar card)
-        self.maze_gen_dropdown.rect = pygame.Rect(dropdown_x, cur_y, target_btn_w, dropdown_h)
-        cur_y += dropdown_h + row_spacing
-
-        # Dòng 5: Generate button (căn giữa trong sidebar card)
-        generate_x = sidebar_card_x + (sidebar_card_w - generate_size[0]) // 2
-        self.btn_generate.rect = pygame.Rect(generate_x, cur_y, generate_size[0], generate_size[1])
-        cur_y += generate_size[1] + row_spacing
-
-        # Dòng 6: History button (căn giữa trong sidebar card)
+        # Dòng 3: History button (căn giữa trong sidebar card)
         history_x = sidebar_card_x + (sidebar_card_w - history_size[0]) // 2
+        history_x = max(sidebar_card_x + side_margin, history_x)  # Đảm bảo không tràn trái
+        # Đảm bảo không tràn phải
+        if history_x + history_size[0] > sidebar_card_x + sidebar_card_w - side_margin:
+            history_x = sidebar_card_x + sidebar_card_w - side_margin - history_size[0]
         self.btn_history.rect = pygame.Rect(history_x, cur_y, history_size[0], history_size[1])
         if self.btn_history.bg_image:
             self.btn_history.scaled_bg = pygame.transform.smoothscale(
                 self.btn_history.bg_image, history_size)
         cur_y += history_size[1] + row_spacing
 
-        # Dòng 7: Back button (căn giữa trong sidebar card)
+        # Dòng 4: Back button (căn giữa trong sidebar card)
         back_x = sidebar_card_x + (sidebar_card_w - back_size[0]) // 2
+        back_x = max(sidebar_card_x + side_margin, back_x)  # Đảm bảo không tràn trái
+        # Đảm bảo không tràn phải
+        if back_x + back_size[0] > sidebar_card_x + sidebar_card_w - side_margin:
+            back_x = sidebar_card_x + sidebar_card_w - side_margin - back_size[0]
         self.btn_back.rect = pygame.Rect(back_x, cur_y, back_size[0], back_size[1])
         if self.btn_back.bg_image:
             self.btn_back.scaled_bg = pygame.transform.smoothscale(
@@ -553,19 +699,32 @@ class App:
 
         # Scale sidebar width theo tỷ lệ cửa sổ
         scale_factor = min(screen.w / 1920, screen.h / 1080)
-        scale_factor = max(0.5, min(1.0, scale_factor))
+        scale_factor = max(0.5, min(1.5, scale_factor))  # Tăng max từ 1.2 lên 1.5 để cho phép to hơn nữa
         scaled_panel_w = int(RIGHT_PANEL_W * scale_factor)
-        scaled_panel_w = max(200, scaled_panel_w)
+        scaled_panel_w = max(180, min(scaled_panel_w, 650))  # Giảm tối thiểu từ 200 xuống 180px
+        
+        # Đảm bảo sidebar không quá lớn so với màn hình
+        max_sidebar_ratio = 0.35  # Sidebar không chiếm quá 35% màn hình
+        scaled_panel_w = min(scaled_panel_w, int(screen.w * max_sidebar_ratio))
+
+        # Get current level config
+        level_config = LEVEL_CONFIGS[self.current_level]
+        maze_cols = level_config['cols']
+        maze_rows = level_config['rows']
 
         left_space = screen.w - scaled_panel_w
         margin = max(12, int(24 * scale_factor))
         avail_w = left_space - margin*2
         avail_h = screen.h - margin*2
-        cell_w = avail_w // MAZE_COLS
-        cell_h = avail_h // MAZE_ROWS
+        
+        # Calculate cell size to fit the available space (zoom smaller mazes)
+        cell_w = avail_w // maze_cols
+        cell_h = avail_h // maze_rows
         self.cell_size = min(cell_w, cell_h)
-        maze_w = self.cell_size * MAZE_COLS
-        maze_h = self.cell_size * MAZE_ROWS
+        
+        # Calculate actual maze size
+        maze_w = self.cell_size * maze_cols
+        maze_h = self.cell_size * maze_rows
         self.maze_rect = pygame.Rect((left_space - maze_w)//2 + margin, (screen.h-maze_h)//2, maze_w, maze_h)
 
         # Cập nhật lại kích thước và vị trí các nút game (chỉ khi đã khởi tạo)
@@ -575,37 +734,241 @@ class App:
     # ---- State transitions
     def goto_start(self):
         self.save_run(label="Manual" if not self.auto_on else f"Auto ({self.selected_algo or 'None'})")
-        self.state = "start"; self.modal_history.visible=False
+        self.start_transition("game", "start")
 
     def goto_game(self):
-        self.state = "game"; self.reset_run()
+        # Show level select instead of going directly to game
+        self.showing_level_select = True
+        self.modal_level_select.show(self.unlocked_levels, self.coins)
+    
+    def start_level(self, level):
+        """Start a specific level"""
+        # Check if level is unlocked
+        if level not in self.unlocked_levels:
+            return
+        self.current_level = level
+        self.showing_level_select = False
+        # Reset auto use count for each level
+        self.auto_use_count = 0
+        # Prepare maze synchronously first (for transition to work)
+        self.prepare_maze_for_level()
+        # Then start transition with animation
+        self.start_transition("start", "game")
+    
+    def prepare_maze_for_level(self):
+        """Prepare maze synchronously without animation (for transition)"""
+        import random
+        
+        # Get current level config
+        level_config = LEVEL_CONFIGS[self.current_level]
+        maze_cols = level_config['cols']
+        maze_rows = level_config['rows']
+        
+        # Chọn thuật toán ngẫu nhiên
+        generation_algos = ["DFS", "Kruskal", "Binary_Tree", "Wilson", "Recursive_Division"]
+        self.selected_generation_algo = random.choice(generation_algos)
+        
+        # Tạo model KHÔNG có animation
+        self.generation_model = GenerationModel(maze_cols, maze_rows, self.selected_generation_algo)
+        self.generation_model.animated_generation = False  # No animation for transition
+        
+        # Generate maze hoàn chỉnh
+        self.generation_model.generate_maze()
+        
+        # Copy maze hoàn chỉnh
+        self.maze = self.generation_model.Maze
+        self.MazeGenerated = self.generation_model.Maze
+        
+        # Rebuild floor map với kích thước đúng của level mới
+        import random as rand
+        rand.seed(42)
+        self.floor_map = [[rand.randrange(len(self.floor_tiles)) for _ in range(maze_cols)] for _ in range(maze_rows)]
+        
+        # Recompute layout for new level size
+        self.compute_layout()
+        
+        # Prepare sprites
+        self.prepare_sprites()
+    
+    def next_level(self):
+        """Move to next level"""
+        if self.current_level < self.max_level:
+            self.current_level += 1
+            # Generate new maze with correct size for the new level before reset
+            self.generate_maze()
+        else:
+            # All levels completed - show game complete modal
+            self.showing_game_complete = True
+            self.modal_game_complete.show(self.level_stats, self.window_rect.w, self.window_rect.h)
+    
+    def back_to_menu(self):
+        """Go back to start menu and reset game"""
+        self.showing_game_complete = False
+        self.current_level = 1
+        self.level_stats = {}
+        # Reset coin system and unlocked levels
+        self.coins = 0
+        self.auto_use_count = 0
+        self.unlocked_levels = {1}
+        self.goto_start()
+    
+    def start_transition(self, from_state, to_state):
+        """Bắt đầu hiệu ứng chuyển cảnh circle 2 pha"""
+        self.transitioning = True
+        self.transition_progress = 0.0
+        self.transition_from = from_state
+        self.transition_to = to_state
+        
+        # Capture current screen
+        self.transition_surface_from = self.screen.copy()
+        
+        # Prepare target state (but don't change state yet)
+        if to_state == "game":
+            # Pre-render game screen
+            old_state = self.state
+            self.state = "game"
+            self.reset_run()
+            self.draw_game()
+            self.transition_surface_to = self.screen.copy()
+            self.state = old_state  # Restore state
+        elif to_state == "start":
+            old_state = self.state
+            self.state = "start"
+            self.modal_history.visible = False
+            self.draw_start()
+            self.transition_surface_to = self.screen.copy()
+            self.state = old_state
 
     def reset_run(self):
         self.steps = 0; self.timer = 0.0; self.start_time = time.time()
         self.paused = False; self.auto_on=False
+        self.game_won = False  # Reset game won state
         self.player= [1,1]  # Bắt đầu từ (1,1) thay vì (0,0) vì viền ngoài là tường
         self.maze = self.MazeGenerated
         self.prepare_sprites()
         self.modal_victory.hide()
+        
+        # Get current level config
+        level_config = LEVEL_CONFIGS[self.current_level]
+        maze_cols = level_config['cols']
+        maze_rows = level_config['rows']
+        
+        # Reset time limit from level config
+        self.time_limit = level_config['time_limit']
+        self.time_remaining = self.time_limit
+        
+        # Rebuild floor map for current level size
+        import random as rand
+        rand.seed(42)
+        self.floor_map = [[rand.randrange(len(self.floor_tiles)) for _ in range(maze_cols)] for _ in range(maze_rows)]
+        
+        # Recompute layout for new level size
+        self.compute_layout()
+        
+        # Spawn collectibles (small bananas) and calculate steps
+        self.spawn_collectibles()  # This also sets max_steps and steps_remaining
+        self.collected_count = 0
 
     def restart_level(self): self.reset_run()
     def toggle_play(self): self.paused = not self.paused
-    def toggle_auto(self): self.auto_on = not self.auto_on
-    def set_algo(self, name): self.selected_algo = name
-    def set_generation_algo(self, name):
-        """Thiết lập thuật toán sinh mê cung được chọn"""
-        self.selected_generation_algo = name
+    
+    def get_auto_cost(self):
+        """Get the cost in coins for the next auto use"""
+        return self.auto_use_count + 1
+    
+    def can_use_auto(self):
+        """Check if player has enough coins for auto"""
+        return self.coins >= self.get_auto_cost()
+    
+    def toggle_auto(self): 
+        import random
+        
+        # Check if auto is being turned on
+        if not self.auto_on:
+            # Check if player has enough coins
+            cost = self.get_auto_cost()
+            if self.coins < cost:
+                # Not enough coins - show message (could add a popup later)
+                return
+            
+            # Deduct coins
+            self.coins -= cost
+            self.auto_use_count += 1
+        
+        self.auto_on = not self.auto_on
+        if self.auto_on:
+            # Chọn thuật toán giải ngẫu nhiên
+            solving_algos = ["BFS", "DFS", "UCS", "A*", "Bidirectional"]
+            self.selected_algo = random.choice(solving_algos)
+            
+            # Bắt đầu giải mê cung tự động
+            self.start_auto_solve()
+        else:
+            # Dừng auto solve
+            self.solving_maze = False
+            self.solution_path = []
+            self.solution_index = 0
 
-    def generate_maze(self):
-        """Sinh mê cung mới với hiệu ứng animation"""
-        if not hasattr(self, 'selected_generation_algo') or self.selected_generation_algo is None:
-            return
-
+    def start_maze_animation(self):
+        """Start maze generation animation after transition"""
+        import random
+        
+        # Get current level config
+        level_config = LEVEL_CONFIGS[self.current_level]
+        maze_cols = level_config['cols']
+        maze_rows = level_config['rows']
+        
         # Clear old particles
         self.particle_system.clear()
         
         # Tạo model với animation enabled
-        self.generation_model = GenerationModel(MAZE_COLS, MAZE_ROWS, self.selected_generation_algo)
+        self.generation_model = GenerationModel(maze_cols, maze_rows, self.selected_generation_algo)
+        self.generation_model.animated_generation = True
+        
+        # Generate maze để tạo animation steps
+        self.generation_model.generate_maze()
+        
+        # Copy maze trạng thái ban đầu từ model (tường hết)
+        self.maze = self.generation_model.Maze
+        
+        # Bắt đầu animation
+        self.generating_maze = True
+        self.generation_timer = 0.0
+        
+        # Game state trong lúc animate
+        self.player = [1, 1]
+        self.steps = 0
+        self.timer = 0.0
+        self.start_time = time.time()
+        self.paused = True  # Pause trong lúc đang generate
+        self.game_won = False
+        
+        # Invalidate cache
+        self.invalidate_maze_surface()
+        self.modal_victory.hide()
+
+    def generate_maze(self):
+        """Sinh mê cung mới với hiệu ứng animation"""
+        import random
+        
+        # Get current level config
+        level_config = LEVEL_CONFIGS[self.current_level]
+        maze_cols = level_config['cols']
+        maze_rows = level_config['rows']
+        
+        # Reset time limit from level config
+        self.time_limit = level_config['time_limit']
+        self.time_remaining = self.time_limit
+        
+        # Chọn thuật toán ngẫu nhiên
+        generation_algos = ["DFS", "Kruskal", "Binary_Tree", "Wilson", "Recursive_Division"]
+        self.selected_generation_algo = random.choice(generation_algos)
+
+        # Clear old particles
+        self.particle_system.clear()
+        
+        # Tạo model với animation enabled và kích thước từ level config
+        self.generation_model = GenerationModel(maze_cols, maze_rows, self.selected_generation_algo)
         self.generation_model.animated_generation = True
         
         # Generate maze để tạo animation steps
@@ -614,6 +977,11 @@ class App:
         
         # Copy maze trạng thái ban đầu từ model
         self.maze = self.generation_model.Maze
+        
+        # Rebuild floor map với kích thước đúng của level mới
+        import random as rand
+        rand.seed(42)
+        self.floor_map = [[rand.randrange(len(self.floor_tiles)) for _ in range(maze_cols)] for _ in range(maze_rows)]
         
         # Bắt đầu animation
         self.generating_maze = True
@@ -631,6 +999,189 @@ class App:
         self.prepare_sprites()
         self.invalidate_maze_surface()  # Important for performance optimization
         self.modal_victory.hide()
+
+    def start_auto_solve(self):
+        """Bắt đầu giải mê cung tự động với thuật toán đã chọn"""
+        if self.game_won:
+            return
+        
+        # Get level config
+        level_config = LEVEL_CONFIGS[self.current_level]
+        maze_cols = level_config['cols']
+        maze_rows = level_config['rows']
+        
+        # Tìm vị trí start và end
+        start_pos = None
+        end_pos = None
+        for y in range(maze_rows):
+            for x in range(maze_cols):
+                if self.maze[y][x].status == 2:  # Start
+                    start_pos = (x, y)
+                if self.maze[y][x].status == 3:  # End
+                    end_pos = (x, y)
+        
+        if not start_pos or not end_pos:
+            return
+        
+        # Build path that collects all collectibles using greedy approach
+        full_path = []
+        current_pos = start_pos
+        remaining_collectibles = list(self.collectibles)
+        
+        # Collect all bananas first using nearest neighbor approach
+        while remaining_collectibles:
+            # Find nearest collectible
+            min_dist = float('inf')
+            nearest = None
+            nearest_path = None
+            
+            for collectible in remaining_collectibles:
+                # Calculate path to this collectible
+                self.solving_model = SolvingModel(self.maze, maze_cols, maze_rows)
+                self.solving_model.start_pos = current_pos
+                self.solving_model.end_pos = collectible
+                
+                if self.solving_model.solve_maze(self.selected_algo):
+                    path_length = len(self.solving_model.solution_path)
+                    if path_length < min_dist:
+                        min_dist = path_length
+                        nearest = collectible
+                        nearest_path = self.solving_model.solution_path
+            
+            if nearest and nearest_path:
+                # Add path to this collectible (excluding start position to avoid duplicates)
+                if full_path:
+                    full_path.extend(nearest_path[1:])
+                else:
+                    full_path.extend(nearest_path)
+                current_pos = nearest
+                remaining_collectibles.remove(nearest)
+            else:
+                # Can't reach any collectible
+                self.auto_on = False
+                return
+        
+        # Finally, go to the end position
+        self.solving_model = SolvingModel(self.maze, maze_cols, maze_rows)
+        self.solving_model.start_pos = current_pos
+        self.solving_model.end_pos = end_pos
+        
+        if self.solving_model.solve_maze(self.selected_algo):
+            # Add final path (excluding start to avoid duplicate)
+            full_path.extend(self.solving_model.solution_path[1:])
+            
+            self.solution_path = full_path
+            self.solving_maze = True
+            self.solution_index = 0
+            self.solve_timer = 0.0
+            self.paused = False
+        else:
+            # Không tìm thấy đường đi
+            self.auto_on = False
+
+    def calculate_shortest_path(self, start, end):
+        """Calculate shortest path distance using BFS"""
+        from collections import deque
+        
+        if start == end:
+            return 0
+        
+        # Get level config
+        level_config = LEVEL_CONFIGS[self.current_level]
+        maze_cols = level_config['cols']
+        maze_rows = level_config['rows']
+        
+        queue = deque([(start, 0)])
+        visited = {start}
+        
+        while queue:
+            (x, y), dist = queue.popleft()
+            
+            # Check all 4 directions
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = x + dx, y + dy
+                
+                if (nx, ny) == end:
+                    return dist + 1
+                
+                if (0 <= nx < maze_cols and 0 <= ny < maze_rows and
+                    (nx, ny) not in visited and
+                    self.maze[ny][nx].status != 0):  # Not a wall
+                    visited.add((nx, ny))
+                    queue.append(((nx, ny), dist + 1))
+        
+        return float('inf')  # No path found
+    
+    def calculate_optimal_steps(self):
+        """Calculate optimal steps to collect all bananas and reach goal"""
+        if not self.collectibles:
+            return 0
+        
+        # Get level config
+        level_config = LEVEL_CONFIGS[self.current_level]
+        maze_cols = level_config['cols']
+        maze_rows = level_config['rows']
+        
+        start = tuple(self.player)
+        goal = (maze_cols - 2, maze_rows - 2)
+        
+        # Use greedy approach: always go to nearest uncollected banana
+        # This is not always optimal but good approximation
+        current = start
+        remaining = list(self.collectibles)
+        total_distance = 0
+        
+        # Collect all bananas
+        while remaining:
+            # Find nearest banana
+            min_dist = float('inf')
+            nearest = None
+            
+            for banana in remaining:
+                dist = self.calculate_shortest_path(current, banana)
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest = banana
+            
+            if nearest:
+                total_distance += min_dist
+                current = nearest
+                remaining.remove(nearest)
+        
+        # Finally go to goal
+        total_distance += self.calculate_shortest_path(current, goal)
+        
+        return total_distance
+    
+    def spawn_collectibles(self):
+        """Spawn collectibles (small bananas) in random path cells"""
+        self.collectibles = []
+        
+        # Get current level config
+        level_config = LEVEL_CONFIGS[self.current_level]
+        maze_cols = level_config['cols']
+        maze_rows = level_config['rows']
+        extra_steps = level_config['extra_steps']
+        
+        # Find all path cells (status = 1)
+        path_cells = []
+        for y in range(maze_rows):
+            for x in range(maze_cols):
+                if self.maze[y][x].status == 1:  # Path cell
+                    # Avoid start and end positions
+                    if (x, y) != (1, 1) and (x, y) != (maze_cols-2, maze_rows-2):
+                        path_cells.append((x, y))
+        
+        # Spawn exactly 3 small bananas
+        if path_cells:
+            num_collectibles = 3
+            self.collectibles = random.sample(path_cells, min(num_collectibles, len(path_cells)))
+            self.total_collectibles = len(self.collectibles)
+        
+        # Calculate optimal steps and set max steps using level's extra_steps
+        optimal_steps = self.calculate_optimal_steps()
+        self.max_steps = optimal_steps + extra_steps  # Use extra_steps from level config
+        self.steps_remaining = self.max_steps
 
     def open_history(self): self.modal_history.visible = True
 
@@ -687,37 +1238,144 @@ class App:
                 if self.modal_victory.visible:
                     self.modal_victory.handle_event(event)
                 else:
-                    for b in (self.btn_restart, self.btn_play, self.btn_pause, self.btn_auto, self.btn_history, self.btn_back, self.btn_generate): b.handle_event(event)
-                    self.dropdown.handle_event(event)
-                    self.maze_gen_dropdown.handle_event(event)
+                    for b in (self.btn_restart, self.btn_play, self.btn_pause, self.btn_auto, self.btn_history, self.btn_back): b.handle_event(event)
                     if event.type == pygame.KEYDOWN and not self.paused:
-                        if event.key in (pygame.K_LEFT, pygame.K_a): self.move(-1,0)
-                        if event.key in (pygame.K_RIGHT, pygame.K_d): self.move(1,0)
-                        if event.key in (pygame.K_UP, pygame.K_w): self.move(0,-1)
-                        if event.key in (pygame.K_DOWN, pygame.K_s): self.move(0,1)
+                        # Khi nhấn phím lần đầu, di chuyển 1 ô và reset timer
+                        if event.key in (pygame.K_LEFT, pygame.K_a): 
+                            self.move(-1,0)
+                            self.last_move_time = pygame.time.get_ticks() / 1000.0
+                        if event.key in (pygame.K_RIGHT, pygame.K_d): 
+                            self.move(1,0)
+                            self.last_move_time = pygame.time.get_ticks() / 1000.0
+                        if event.key in (pygame.K_UP, pygame.K_w): 
+                            self.move(0,-1)
+                            self.last_move_time = pygame.time.get_ticks() / 1000.0
+                        if event.key in (pygame.K_DOWN, pygame.K_s): 
+                            self.move(0,1)
+                            self.last_move_time = pygame.time.get_ticks() / 1000.0
             if self.modal_history.visible and (event.type in (pygame.MOUSEBUTTONDOWN, pygame.KEYDOWN)):
                 self.modal_history.visible=False
+            
+            # Handle level select modal
+            if self.showing_level_select:
+                self.modal_level_select.handle_event(event)
+            
+            # Handle game complete modal
+            if self.showing_game_complete:
+                self.modal_game_complete.handle_event(event)
 
     def move(self, dx, dy):
         if self.game_won: return  # Không cho di chuyển khi đã thắng
+        if self.steps_remaining <= 0: return  # Hết bước rồi!
 
         c, r = self.player; nc, nr = c+dx, r+dy
         if 0 <= nc < MAZE_COLS and 0 <= nr < MAZE_ROWS:
             # Cho phép di chuyển trên Path (1), Start (2), và End (3)
             if self.maze[nr][nc].status in [1, 2, 3]:
                 self.player=[nc,nr]; self.steps += 1
+                self.steps_remaining -= 1  # Giảm số bước còn lại
+                
+                # Check for collectible pickup
+                if (nc, nr) in self.collectibles:
+                    self.collectibles.remove((nc, nr))
+                    self.collected_count += 1
+                    # Emit particle effect for collection
+                    if self.maze_rect and self.cell_size:
+                        screen_x = self.maze_rect.x + nc * self.cell_size + self.cell_size // 2
+                        screen_y = self.maze_rect.y + nr * self.cell_size + self.cell_size // 2
+                        self.particle_system.emit_path_creation(screen_x, screen_y, self.cell_size, 
+                                                               path_color=(255, 220, 100))
 
+                # Get level config
+                level_config = LEVEL_CONFIGS[self.current_level]
+                maze_cols = level_config['cols']
+                maze_rows = level_config['rows']
+                
                 # Kiểm tra chiến thắng (chạm chuối ở vị trí thực tế)
-                if nc == MAZE_COLS-2 and nr == MAZE_ROWS-2:
-                    self.game_won = True
-                    self.paused = True
-                    time_str = f"{int(self.timer//60):02d}:{int(self.timer%60):02d}"
-                    self.modal_victory.show(time_str, self.steps)
+                if nc == maze_cols-2 and nr == maze_rows-2:
+                    # Chỉ chiến thắng nếu đã nhặt hết chuối nhỏ
+                    if self.collected_count >= self.total_collectibles:
+                        self.game_won = True
+                        self.paused = True
+                        time_str = f"{int(self.timer//60):02d}:{int(self.timer%60):02d}"
+                        
+                        # Award coin if completed with more than 60% time remaining
+                        earned_coin = self.time_remaining > self.time_limit * self.coin_reward_ratio
+                        if earned_coin:
+                            self.coins += 1
+                        
+                        # Unlock next level
+                        if self.current_level < self.max_level:
+                            self.unlocked_levels.add(self.current_level + 1)
+                        
+                        # Lưu stats cho level này
+                        self.level_stats[self.current_level] = {
+                            'time': time_str,
+                            'steps': self.steps,
+                            'completed': True,
+                            'coins_earned': 1 if earned_coin else 0
+                        }
+                        
+                        # Kiểm tra nếu đây là level cuối -> hiển thị game complete
+                        if self.current_level >= self.max_level:
+                            self.showing_game_complete = True
+                            self.modal_game_complete.show(self.level_stats, self.window_rect.w, self.window_rect.h)
+                        else:
+                            # Hiển thị modal victory với nút Next
+                            self.modal_victory.show(time_str, self.steps, is_victory=True, show_next=True)
+                    # Nếu chưa nhặt hết, không làm gì (không cho chiến thắng)
 
     # ---- Update / Draw
     def update(self, dt):
+        # Update transition
+        if self.transitioning:
+            self.transition_progress += dt / self.transition_duration
+            if self.transition_progress >= 1.0:
+                # Transition complete
+                self.transition_progress = 1.0
+                self.transitioning = False
+                self.state = self.transition_to
+                
+                # Apply final state changes
+                if self.state == "start":
+                    self.modal_history.visible = False
+                elif self.state == "game":
+                    # Start maze generation animation after transition completes
+                    self.start_maze_animation()
+                
+                # Clean up
+                self.transition_surface_from = None
+                self.transition_surface_to = None
+            return  # Skip normal update during transition
+        
+        # Xử lý di chuyển liên tục khi giữ phím
+        if self.state == "game" and not self.paused and not self.game_won:
+            current_time = pygame.time.get_ticks() / 1000.0
+            
+            # Kiểm tra nếu đã đủ thời gian delay
+            if current_time - self.last_move_time >= self.key_hold_delay:
+                keys = pygame.key.get_pressed()
+                
+                # Kiểm tra phím di chuyển đang được giữ
+                if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+                    self.move(-1, 0)
+                    self.last_move_time = current_time
+                elif keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+                    self.move(1, 0)
+                    self.last_move_time = current_time
+                elif keys[pygame.K_UP] or keys[pygame.K_w]:
+                    self.move(0, -1)
+                    self.last_move_time = current_time
+                elif keys[pygame.K_DOWN] or keys[pygame.K_s]:
+                    self.move(0, 1)
+                    self.last_move_time = current_time
+        
         # Update particle system
         self.particle_system.update(dt)
+        
+        # Update game complete modal (for confetti animation)
+        if self.showing_game_complete:
+            self.modal_game_complete.update(dt)
         
         # Update maze generation animation
         if self.generating_maze:
@@ -763,10 +1421,15 @@ class App:
                         self.generating_maze = False
                         self.paused = False
                         
+                        # Get level config for finding start/end
+                        level_config = LEVEL_CONFIGS[self.current_level]
+                        maze_cols = level_config['cols']
+                        maze_rows = level_config['rows']
+                        
                         # Find and set start position (first path cell)
                         start_found = False
-                        for y in range(MAZE_ROWS):
-                            for x in range(MAZE_COLS):
+                        for y in range(maze_rows):
+                            for x in range(maze_cols):
                                 if self.maze[y][x].status == 1:
                                     self.maze[y][x].status = 2  # Start
                                     self.player = [x, y]
@@ -777,8 +1440,8 @@ class App:
                         
                         # Find and set end position (last path cell)
                         end_found = False
-                        for y in range(MAZE_ROWS - 1, -1, -1):
-                            for x in range(MAZE_COLS - 1, -1, -1):
+                        for y in range(maze_rows - 1, -1, -1):
+                            for x in range(maze_cols - 1, -1, -1):
                                 if self.maze[y][x].status == 1:
                                     self.maze[y][x].status = 3  # End
                                     end_found = True
@@ -789,6 +1452,16 @@ class App:
                         self.MazeGenerated = self.maze
                         self.start_time = time.time()
                         
+                        # Recompute layout to adjust cell size for the new maze dimensions
+                        self.compute_layout()
+                        
+                        # Prepare sprites with new cell size to scale tiles correctly
+                        self.prepare_sprites()
+                        
+                        # Spawn collectibles after maze generation complete
+                        self.spawn_collectibles()
+                        self.collected_count = 0
+                        
                         # Clear particles when done
                         self.particle_system.clear()
                         break
@@ -796,9 +1469,104 @@ class App:
                     self.generating_maze = False
                     break
         
+        # Update auto solve animation
+        if self.solving_maze and self.auto_on and not self.paused:
+            self.solve_timer += dt
+            
+            if self.solve_timer >= self.solve_speed:
+                self.solve_timer = 0.0
+                
+                if self.solution_index < len(self.solution_path) and self.steps_remaining > 0:
+                    # Di chuyển đến vị trí tiếp theo trong đường đi
+                    next_pos = self.solution_path[self.solution_index]
+                    self.player = list(next_pos)
+                    self.steps += 1
+                    self.steps_remaining -= 1  # Giảm số bước còn lại
+                    self.solution_index += 1
+                    
+                    # Check for collectible pickup during auto-solve
+                    if next_pos in self.collectibles:
+                        self.collectibles.remove(next_pos)
+                        self.collected_count += 1
+                    
+                    # Get level config
+                    level_config = LEVEL_CONFIGS[self.current_level]
+                    maze_cols = level_config['cols']
+                    maze_rows = level_config['rows']
+                    
+                    # Kiểm tra xem đã hết bước
+                    if self.steps_remaining <= 0:
+                        self.game_won = True
+                        self.paused = True
+                        self.auto_on = False
+                        self.solving_maze = False
+                        time_str = "OUT OF STEPS!"
+                        self.modal_victory.show(time_str, self.steps, is_victory=False, show_next=False)
+                    # Kiểm tra xem đã đến đích chưa
+                    elif next_pos[0] == maze_cols-2 and next_pos[1] == maze_rows-2:
+                        # Chỉ thắng nếu đã nhặt hết chuối
+                        if self.collected_count >= self.total_collectibles:
+                            self.game_won = True
+                            self.paused = True
+                            self.auto_on = False
+                            self.solving_maze = False
+                            time_str = f"{int(self.timer//60):02d}:{int(self.timer%60):02d}"
+                            
+                            # Award coin if completed with more than 60% time remaining
+                            earned_coin = self.time_remaining > self.time_limit * self.coin_reward_ratio
+                            if earned_coin:
+                                self.coins += 1
+                            
+                            # Unlock next level
+                            if self.current_level < self.max_level:
+                                self.unlocked_levels.add(self.current_level + 1)
+                            
+                            # Lưu stats cho level này
+                            self.level_stats[self.current_level] = {
+                                'time': time_str,
+                                'steps': self.steps,
+                                'completed': True,
+                                'coins_earned': 1 if earned_coin else 0
+                            }
+                            
+                            # Kiểm tra nếu đây là level cuối -> hiển thị game complete
+                            if self.current_level >= self.max_level:
+                                self.showing_game_complete = True
+                                self.modal_game_complete.show(self.level_stats, self.window_rect.w, self.window_rect.h)
+                            else:
+                                # Hiển thị modal victory với nút Next
+                                self.modal_victory.show(time_str, self.steps, is_victory=True, show_next=True)
+                else:
+                    # Đã đi hết đường hoặc hết bước
+                    self.solving_maze = False
+                    self.auto_on = False
+        
         # Update game state
         if self.state=="game" and not self.paused:
-            self.timer += dt; self.monkey_idle.update(dt); self.banana.update(dt)
+            self.timer += dt
+            self.monkey_idle.update(dt)
+            self.banana.update(dt)
+            
+            # Update countdown timer
+            if not self.game_won and not self.generating_maze:
+                self.time_remaining -= dt
+                
+                # Check for time out
+                if self.time_remaining <= 0:
+                    self.time_remaining = 0
+                    self.game_won = True
+                    self.paused = True
+                    # Show defeat message
+                    time_str = "TIME OUT!"
+                    self.modal_victory.show(time_str, self.steps, is_victory=False, show_next=False)
+                
+                # Check for out of steps
+                if self.steps_remaining <= 0 and not self.game_won:
+                    self.game_won = True
+                    self.paused = True
+                    # Show defeat message
+                    time_str = "OUT OF STEPS!"
+                    self.modal_victory.show(time_str, self.steps, is_victory=False, show_next=False)
 
     def draw_start(self):
         # background full, no blur
@@ -823,6 +1591,11 @@ class App:
         # Window controls - vẽ cuối cùng để đảm bảo không bị đè
         for b in (self.btn_min, self.btn_max, self.btn_close):
             b.draw(self.screen)
+        
+        # Draw level select modal if visible
+        if self.showing_level_select:
+            self.modal_level_select.draw(self.screen, self.window_rect, 
+                                         self.font_title, self.font_ui, LEVEL_CONFIGS)
 
     def draw_game(self):
         # Update performance monitoring
@@ -838,12 +1611,19 @@ class App:
 
         # Scale sidebar width theo tỷ lệ cửa sổ
         scale_factor = min(self.window_rect.w / 1920, self.window_rect.h / 1080)
-        scale_factor = max(0.5, min(1.0, scale_factor))
+        scale_factor = max(0.5, min(1.5, scale_factor))  # Tăng max từ 1.2 lên 1.5 để cho phép to hơn nữa
         scaled_panel_w = int(RIGHT_PANEL_W * scale_factor)
-        scaled_panel_w = max(200, scaled_panel_w)
+        scaled_panel_w = max(180, min(scaled_panel_w, 650))  # Giảm tối thiểu từ 200 xuống 180px
 
         # sidebar card - use optimized drawing for small windows
-        sidebar = pygame.Rect(self.window_rect.w-scaled_panel_w+int(10*scale_factor), 60, scaled_panel_w-int(20*scale_factor), self.window_rect.h-70)
+        sidebar_card_margin = int(10 * scale_factor)
+        sidebar_card_margin = max(2, sidebar_card_margin)  # Giảm margin xuống 2px khi màn hình nhỏ
+        sidebar = pygame.Rect(
+            self.window_rect.w - scaled_panel_w + sidebar_card_margin, 
+            60, 
+            scaled_panel_w - (sidebar_card_margin * 2), 
+            self.window_rect.h - 70
+        )
 
         # Vẽ sidebar bán trong suốt (cả performance mode và normal mode)
         if self.skip_expensive_effects:
@@ -866,14 +1646,18 @@ class App:
             status_y = sidebar.y + int(20*scale_factor)
             self.screen.blit(status_label, (status_x, status_y))
         
-        t = f"{int(self.timer//60):02d}:{int(self.timer%60):02d}"
+        # Hiển thị thời gian còn lại thay vì thời gian đã chơi
+        time_left_minutes = int(self.time_remaining // 60)
+        time_left_seconds = int(self.time_remaining % 60)
+        t = f"{time_left_minutes:02d}:{time_left_seconds:02d}"
         y0 = sidebar.y+int(35*scale_factor)  # Giảm từ 50 xuống 35 để nhích lên
         chip_spacing = int(10*scale_factor)
         
         # Tính kích thước time box dựa trên aspect ratio của asset - TO HƠN
         time_box_img = self.box_assets['time']
         time_box_aspect = time_box_img.get_width() / time_box_img.get_height()
-        target_time_h = max(70, int(50 * scale_factor))  
+        target_time_h = max(40, int(100 * scale_factor))  # Giảm tối thiểu từ 50 xuống 40px
+        target_time_h = min(target_time_h, 120)  # Tối đa 120px
         chip1_w = int(target_time_h * time_box_aspect)  # Chiều rộng giữ tỷ lệ
         chip1_h = target_time_h
         
@@ -894,8 +1678,15 @@ class App:
         time_box_scaled = pygame.transform.smoothscale(self.box_assets['time'], (chip1_w, chip1_h))
         self.screen.blit(time_box_scaled, chip1.topleft)
 
-        # Font lớn hơn và in đậm cho time (jungle theme)
-        time_label = self.font_chip.render(t, True, (255, 250, 220))  # Màu vàng kem
+        # Font lớn hơn và in đậm cho time với màu đổi theo thời gian còn lại
+        if self.time_remaining <= 10:
+            time_color = (255, 80, 80)  # Đỏ - nguy hiểm
+        elif self.time_remaining <= 30:
+            time_color = (255, 200, 80)  # Vàng cam - cảnh báo
+        else:
+            time_color = (255, 250, 220)  # Vàng kem - bình thường
+        
+        time_label = self.font_chip.render(t, True, time_color)
         time_x = chip1.x + (chip1.width - time_label.get_width()) // 2  # Căn giữa
         time_y = chip1.y + (chip1.height - time_label.get_height()) // 2  # Căn giữa
         self.screen.blit(time_label, (time_x, time_y))
@@ -906,88 +1697,232 @@ class App:
         step_box_scaled = pygame.transform.smoothscale(self.box_assets['step'], (chip2_w, chip2_h))
         self.screen.blit(step_box_scaled, chip2.topleft)
 
-        # Font lớn hơn và in đậm cho steps (jungle theme)
-        steps_label = self.font_chip.render(str(self.steps), True, (255, 250, 220))  # Màu vàng kem
+        # Font lớn hơn và in đậm cho steps remaining (jungle theme)
+        # Color code based on remaining steps
+        if self.steps_remaining > 20:
+            steps_color = (100, 255, 100)  # Green
+        elif self.steps_remaining > 10:
+            steps_color = (255, 220, 100)  # Yellow
+        else:
+            steps_color = (255, 100, 100)  # Red
+        
+        steps_label = self.font_chip.render(str(max(0, self.steps_remaining)), True, steps_color)
         steps_x = chip2.x + (chip2.width - steps_label.get_width()) // 2  # Căn giữa
         steps_y = chip2.y + (chip2.height - steps_label.get_height()) // 2  # Căn giữa
         self.screen.blit(steps_label, (steps_x, steps_y))
+        
+        # Display collectibles count với banana icon
+        info_y = chip2.bottom + int(8 * scale_factor)
+        
+        # Collectibles count - sử dụng hình ảnh banana thay vì emoji
+        icon_size = int(20 * scale_factor)
+        icon_size = max(14, min(icon_size, 24))
+        
+        # Scale banana icon
+        banana_icon = pygame.transform.smoothscale(self.banana_img, (icon_size, icon_size))
+        
+        collectibles_text = f"{self.collected_count}/{self.total_collectibles}"
+        collectibles_label = self.font_small.render(collectibles_text, True, (255, 220, 100))
+        
+        # Tính tổng width và căn giữa
+        total_width = icon_size + 4 + collectibles_label.get_width()
+        start_x = sidebar.x + (sidebar.width - total_width) // 2
+        
+        # Vẽ banana icon và text
+        self.screen.blit(banana_icon, (start_x, info_y + (collectibles_label.get_height() - icon_size) // 2))
+        self.screen.blit(collectibles_label, (start_x + icon_size + 4, info_y))
+        info_y += collectibles_label.get_height() + int(6 * scale_factor)
+        
+        # === COIN BOX - Ô hiển thị xu ===
+        coin_box_w = int(sidebar.width * 0.85)
+        coin_box_h = int(35 * scale_factor)
+        coin_box_h = max(28, min(coin_box_h, 45))
+        coin_box_x = sidebar.x + (sidebar.width - coin_box_w) // 2
+        coin_box_y = info_y
+        coin_box = pygame.Rect(coin_box_x, coin_box_y, coin_box_w, coin_box_h)
+        
+        # Background gradient effect for coin box
+        coin_bg_color = (60, 50, 20)  # Dark gold/brown background
+        coin_border_color = (255, 200, 50)  # Gold border
+        pygame.draw.rect(self.screen, coin_bg_color, coin_box, border_radius=8)
+        pygame.draw.rect(self.screen, coin_border_color, coin_box, width=2, border_radius=8)
+        
+        # Inner highlight
+        inner_highlight = pygame.Rect(coin_box.x + 3, coin_box.y + 3, coin_box.width - 6, coin_box.height // 3)
+        highlight_surf = pygame.Surface((inner_highlight.width, inner_highlight.height), pygame.SRCALPHA)
+        highlight_surf.fill((255, 220, 100, 40))
+        self.screen.blit(highlight_surf, inner_highlight.topleft)
+        
+        # Coin icon (vẽ hình tròn vàng) và text
+        coin_icon_size = int(18 * scale_factor)
+        coin_icon_size = max(12, min(coin_icon_size, 22))
+        
+        coin_num_text = str(self.coins)
+        coin_label = self.font_chip.render(coin_num_text, True, (255, 215, 0))
+        
+        # Tính tổng width và căn giữa trong coin box
+        coin_total_width = coin_icon_size + 6 + coin_label.get_width()
+        coin_start_x = coin_box.x + (coin_box.width - coin_total_width) // 2
+        coin_center_y = coin_box.y + coin_box.height // 2
+        
+        # Vẽ coin icon (hình tròn vàng với viền và chữ $)
+        coin_icon_x = coin_start_x + coin_icon_size // 2
+        coin_icon_y = coin_center_y
+        pygame.draw.circle(self.screen, (255, 200, 50), (coin_icon_x, coin_icon_y), coin_icon_size // 2)  # Vàng đậm
+        pygame.draw.circle(self.screen, (218, 165, 32), (coin_icon_x, coin_icon_y), coin_icon_size // 2, 2)  # Viền
+        # Vẽ chữ $ nhỏ trong coin
+        dollar_font_size = max(10, coin_icon_size - 6)
+        dollar_font = pygame.font.SysFont('Arial', dollar_font_size, bold=True)
+        dollar_text = dollar_font.render('$', True, (139, 90, 0))
+        self.screen.blit(dollar_text, (coin_icon_x - dollar_text.get_width() // 2, coin_icon_y - dollar_text.get_height() // 2))
+        
+        # Vẽ số coins
+        coin_text_x = coin_start_x + coin_icon_size + 6
+        coin_text_y = coin_center_y - coin_label.get_height() // 2
+        self.screen.blit(coin_label, (coin_text_x, coin_text_y))
+        
+        info_y = coin_box.bottom + int(6 * scale_factor)
+        
+        # Auto cost display (smaller, below coin box)
+        auto_cost = self.get_auto_cost()
+        if self.can_use_auto():
+            auto_cost_color = (100, 255, 100)  # Green - can afford
+            auto_status = f"Auto: {auto_cost} coins"
+        else:
+            auto_cost_color = (255, 100, 100)  # Red - can't afford
+            auto_status = f"Auto: {auto_cost} coins"
+        auto_label = self.font_small.render(auto_status, True, auto_cost_color)
+        auto_x = sidebar.x + (sidebar.width - auto_label.get_width()) // 2
+        self.screen.blit(auto_label, (auto_x, info_y))
+        info_y += auto_label.get_height() + int(8 * scale_factor)
 
         # buttons - layout mới: mỗi nút chính một hàng riêng, căn giữa, giữ aspect ratio
-        cur_y = y0 + chip1_h + int(16*scale_factor)  # Giảm từ 24 xuống 16
-        side_margin = int(10*scale_factor)  # Margin rất nhỏ để nút lớn nhất
-        side_margin = max(8, side_margin)
-        full_btn_w = scaled_panel_w - (side_margin * 2)  # Chiều rộng tối đa
-        spacing = max(6, int(8*scale_factor))  # Giảm từ 10 xuống 8
+        side_margin = int(8*scale_factor)  # Margin các nút trong sidebar
+        side_margin = max(2, side_margin)  # Giảm margin tối thiểu xuống 2px khi màn hình rất nhỏ
         
-        # Chiều cao cố định cho tất cả các nút để đồng nhất
-        target_btn_h = int(85 * scale_factor)  
-        target_btn_h = max(70, target_btn_h)
+        # Tính chiều cao sidebar có sẵn
+        sidebar_height = sidebar.height
+        
+        # Vị trí bắt đầu các nút sau coin box và auto info
+        cur_y_start = info_y
+        
+        # Chiều cao khả dụng cho các nút
+        available_height = sidebar_height - (cur_y_start - sidebar.y) - 20  # 20px buffer cuối
+        
+        full_btn_w = sidebar.width - (side_margin * 2)  # Chiều rộng tối đa - DỰA VÀO SIDEBAR.WIDTH
+        full_btn_w = max(80, min(full_btn_w, sidebar.width - 6))  # Giảm từ 100 xuống 80px, margin 6px
+        
+        # Chiều cao điều chỉnh theo kích thước màn hình - THU NHỎ KHI MÀN HÌNH NHỎ
+        target_btn_h = int(120 * scale_factor)
+        target_btn_h = max(30, min(target_btn_h, 130))  # Giảm tối thiểu từ 40 xuống 30px
+        
+        # Tính tổng chiều cao cần thiết cho các nút
+        # 4 nút: restart + auto + history + back
+        total_elements_height = target_btn_h * 4
+        
+        # Tính spacing cần thiết
+        num_spaces = 3  # Số khoảng cách giữa 4 nút
+        min_spacing = 3  # Spacing tối thiểu
+        desired_spacing = max(4, int(12 * scale_factor))  # Spacing mong muốn: 4-12px
+        
+        # Thử với spacing mong muốn trước
+        required_height_desired = total_elements_height + (num_spaces * desired_spacing)
+        required_height_min = total_elements_height + (num_spaces * min_spacing)
+        
+        if required_height_desired <= available_height:
+            # Đủ chỗ với spacing lớn
+            spacing = desired_spacing
+        elif required_height_min <= available_height:
+            # Đủ chỗ với spacing vừa phải, tính toán spacing chính xác
+            spacing = int((available_height - total_elements_height) / num_spaces)
+            spacing = max(min_spacing, min(spacing, desired_spacing))
+        else:
+            # Không đủ chỗ, giảm chiều cao nút để có spacing tối thiểu
+            available_for_elements = available_height - (num_spaces * min_spacing)
+            reduction_ratio = available_for_elements / total_elements_height
+            
+            target_btn_h = int(target_btn_h * reduction_ratio * 0.95)  # 0.95 để có buffer
+            target_btn_h = max(22, target_btn_h)  # Tối thiểu 22px
+            
+            spacing = min_spacing  # Dùng spacing tối thiểu
+        
+        cur_y = cur_y_start
 
         # Tính kích thước riêng cho từng nút trước
         restart_size_temp = calculate_button_size(self.btn_assets['restart'], target_height=target_btn_h)
         auto_size_temp = calculate_button_size(self.btn_assets['auto'], target_height=target_btn_h)
         
-        # Lấy chiều rộng lớn nhất để tất cả các nút restart và auto có cùng kích thước
+        # Lấy chiều rộng lớn nhất nhưng KHÔNG ĐƯỢC vượt quá full_btn_w
         max_width = max(restart_size_temp[0], auto_size_temp[0])
+        max_width = min(max_width, full_btn_w)  # Bắt buộc không vượt quá sidebar
+        
+        # Nếu nút vẫn quá rộng, giảm chiều cao để giảm chiều rộng (giữ tỷ lệ)
+        if max_width > full_btn_w:
+            ratio = restart_size_temp[0] / restart_size_temp[1] if restart_size_temp[1] > 0 else 1
+            target_btn_h = int(full_btn_w / ratio)
+            target_btn_h = max(25, target_btn_h)
+            restart_size_temp = calculate_button_size(self.btn_assets['restart'], target_height=target_btn_h)
+            auto_size_temp = calculate_button_size(self.btn_assets['auto'], target_height=target_btn_h)
+            max_width = min(max(restart_size_temp[0], auto_size_temp[0]), full_btn_w)
+        
         restart_size = (max_width, target_btn_h)
         auto_size = (max_width, target_btn_h)
         
-        # Generate button không dùng background image, tính kích thước dựa trên text
-        generate_w = full_btn_w
-        generate_h = int(50 * scale_factor)  # Giảm từ 55 xuống 50
-        generate_h = max(40, generate_h)  # Giảm từ 45 xuống 40
-        generate_size = (generate_w, generate_h)
-        history_size = calculate_button_size(self.btn_assets['history'], target_height=target_btn_h)
-        back_size = calculate_button_size(self.btn_assets['back'], target_height=target_btn_h)
+        # History và back buttons - giới hạn kích thước CHẶT CHẼ
+        history_size_temp = calculate_button_size(self.btn_assets['history'], target_height=target_btn_h)
+        history_width = min(history_size_temp[0], full_btn_w)
+        
+        # Nếu vẫn quá rộng, tính lại chiều cao
+        if history_size_temp[0] > full_btn_w:
+            ratio = history_size_temp[0] / history_size_temp[1] if history_size_temp[1] > 0 else 1
+            new_h = int(full_btn_w / ratio)
+            new_h = max(25, new_h)
+            history_size_temp = calculate_button_size(self.btn_assets['history'], target_height=new_h)
+            history_width = min(history_size_temp[0], full_btn_w)
+            history_size = (history_width, new_h)
+        else:
+            history_size = (history_width, target_btn_h)
+        
+        back_size_temp = calculate_button_size(self.btn_assets['back'], target_height=target_btn_h)
+        back_width = min(back_size_temp[0], full_btn_w)
+        
+        # Nếu vẫn quá rộng, tính lại chiều cao
+        if back_size_temp[0] > full_btn_w:
+            ratio = back_size_temp[0] / back_size_temp[1] if back_size_temp[1] > 0 else 1
+            new_h = int(full_btn_w / ratio)
+            new_h = max(25, new_h)
+            back_size_temp = calculate_button_size(self.btn_assets['back'], target_height=new_h)
+            back_width = min(back_size_temp[0], full_btn_w)
+            back_size = (back_width, new_h)
+        else:
+            back_size = (back_width, target_btn_h)
 
-        # Dòng 1: Restart button (căn giữa)
-        restart_x = sidebar.x + (scaled_panel_w - restart_size[0]) // 2
+        # Dòng 1: Restart button (căn giữa trong sidebar)
+        restart_x = sidebar.x + (sidebar.width - restart_size[0]) // 2
+        restart_x = max(sidebar.x + side_margin, restart_x)  # Đảm bảo không tràn trái
         self.btn_restart.rect = pygame.Rect(restart_x, cur_y, restart_size[0], restart_size[1])
         self.btn_restart.draw(self.screen)
         cur_y += restart_size[1] + spacing
 
-        # Dòng 2: Auto button (căn giữa)
-        auto_x = sidebar.x + (scaled_panel_w - auto_size[0]) // 2
+        # Dòng 2: Auto button (căn giữa trong sidebar)
+        auto_x = sidebar.x + (sidebar.width - auto_size[0]) // 2
+        auto_x = max(sidebar.x + side_margin, auto_x)  # Đảm bảo không tràn trái
         self.btn_auto.rect = pygame.Rect(auto_x, cur_y, auto_size[0], auto_size[1])
         self.btn_auto.draw(self.screen)
         cur_y += auto_size[1] + spacing
 
-        # Dòng 3: Dropdown solving algorithm (căn giữa)
-        dropdown_x = sidebar.x + (scaled_panel_w - full_btn_w) // 2
-        self.dropdown.rect.topleft = (dropdown_x, cur_y)
-        self.dropdown.rect.width = full_btn_w
-        cur_y += self.dropdown.rect.height + spacing
-
-        # Dòng 4: Dropdown generation algorithm (căn giữa)
-        self.maze_gen_dropdown.rect.topleft = (dropdown_x, cur_y)
-        self.maze_gen_dropdown.rect.width = full_btn_w
-        cur_y += self.maze_gen_dropdown.rect.height + spacing
-
-        # Dòng 5: Generate button (căn giữa)
-        generate_x = sidebar.x + (scaled_panel_w - generate_size[0]) // 2
-        self.btn_generate.rect = pygame.Rect(generate_x, cur_y, generate_size[0], generate_size[1])
-        self.btn_generate.draw(self.screen)
-        cur_y += generate_size[1] + spacing
-
-        # Dòng 6: History button (căn giữa)
-        history_x = sidebar.x + (scaled_panel_w - history_size[0]) // 2
+        # Dòng 3: History button (căn giữa trong sidebar)
+        history_x = sidebar.x + (sidebar.width - history_size[0]) // 2
+        history_x = max(sidebar.x + side_margin, history_x)  # Đảm bảo không tràn trái
         self.btn_history.rect = pygame.Rect(history_x, cur_y, history_size[0], history_size[1])
         self.btn_history.draw(self.screen)
         cur_y += history_size[1] + spacing
 
-        # Dòng 7: Back button (căn giữa)
-        back_x = sidebar.x + (scaled_panel_w - back_size[0]) // 2
+        # Dòng 4: Back button (căn giữa trong sidebar)
+        back_x = sidebar.x + (sidebar.width - back_size[0]) // 2
+        back_x = max(sidebar.x + side_margin, back_x)  # Đảm bảo không tràn trái
         self.btn_back.rect = pygame.Rect(back_x, cur_y, back_size[0], back_size[1])
         self.btn_back.draw(self.screen)
-
-        # Vẽ dropdown cuối cùng để chúng hiển thị trên các element khác
-        # Vẽ dropdown đóng trước, dropdown đang mở sau để hiển thị trên cùng
-        if self.dropdown.open:
-            self.maze_gen_dropdown.draw(self.screen)
-            self.dropdown.draw(self.screen)
-        else:
-            self.dropdown.draw(self.screen)
-            self.maze_gen_dropdown.draw(self.screen)
 
         # maze frame card - simplified for performance mode
         if self.skip_expensive_effects:
@@ -995,6 +1930,11 @@ class App:
         else:
             draw_glass_card(self.screen, self.maze_rect, radius=16, bg=(12,22,12,140), border=(90,120,90), border_alpha=55)
 
+        # Get level config for rendering
+        level_config = LEVEL_CONFIGS[self.current_level]
+        maze_cols = level_config['cols']
+        maze_rows = level_config['rows']
+        
         # Use optimized maze rendering for small cells
         if self.cell_size < MIN_CELL_SIZE_FOR_DETAILS:
             # Use pre-rendered maze surface for better performance
@@ -1003,8 +1943,8 @@ class App:
         else:
             # Standard maze rendering for larger cells
             cell = self.cell_size
-            for r in range(MAZE_ROWS):
-                for c in range(MAZE_COLS):
+            for r in range(maze_rows):
+                for c in range(maze_cols):
                     x = self.maze_rect.x + c * cell
                     y = self.maze_rect.y + r * cell
                     idx = self.floor_map[r][c]
@@ -1016,9 +1956,108 @@ class App:
             py = self.maze_rect.y + self.player[1] * cell + (cell - self.monkey_idle.current().get_height())//2
             self.screen.blit(self.monkey_idle.current(), (px, py))
 
+            # draw collectibles (small bananas) - only if not generating maze
+            if not self.generating_maze and self.collectibles:
+                small_banana_size = max(14, int(cell * 0.45))  # Tăng size lên 14px và 45%
+                
+                # Always create or update cache if size changed (regardless of performance mode)
+                if (self.banana_img and 
+                    (self.small_banana_cache is None or self.small_banana_size_cache != small_banana_size)):
+                    try:
+                        self.small_banana_cache = pygame.transform.smoothscale(
+                            self.banana_img, (small_banana_size, small_banana_size))
+                        self.small_banana_size_cache = small_banana_size
+                        
+                        # Clear rotation cache when size changes
+                        self.banana_rotation_cache.clear()
+                        
+                        # Pre-render glow surfaces (2 layers instead of 3 for better performance)
+                        self.banana_glow_cache = []
+                        for i in range(2):  # Giảm từ 3 xuống 2 layers
+                            glow_radius = small_banana_size // 2 + 6 - i * 3
+                            alpha = int(70 - i * 25)
+                            glow_surf = pygame.Surface((glow_radius * 2, glow_radius * 2), pygame.SRCALPHA)
+                            pygame.draw.circle(glow_surf, (255, 220, 100, alpha), 
+                                             (glow_radius, glow_radius), glow_radius)
+                            self.banana_glow_cache.append((glow_surf, glow_radius))
+                        
+                        self.banana_last_cache_size = small_banana_size
+                    except Exception as e:
+                        print(f"Failed to create banana cache: {e}")
+                        self.small_banana_cache = None
+                
+                for idx, (col_x, col_y) in enumerate(self.collectibles):
+                    cx = self.maze_rect.x + col_x * cell + cell // 2
+                    cy_base = self.maze_rect.y + col_y * cell + cell // 2
+                    
+                    # Hiệu ứng lơ lửng (floating effect) - sử dụng float để mượt hơn
+                    float_offset = math.sin(self.timer * 2 + idx * 1.5) * 5  # Di chuyển lên xuống 5 pixels
+                    cy = cy_base + float_offset  # Giữ nguyên float, không làm tròn
+                    
+                    # Try to use cached image even in performance mode
+                    if self.small_banana_cache is not None:
+                        try:
+                            if not self.skip_expensive_effects:
+                                # Full animation with rotation and glow
+                                angle = int((self.timer * 50) % 360)
+                                # Cache rotation frames (every 15 degrees)
+                                cache_angle = (angle // 15) * 15
+                                
+                                if cache_angle not in self.banana_rotation_cache:
+                                    self.banana_rotation_cache[cache_angle] = pygame.transform.rotate(
+                                        self.small_banana_cache, cache_angle)
+                                    # Limit cache size
+                                    if len(self.banana_rotation_cache) > 24:  # 360/15 = 24 frames
+                                        self.banana_rotation_cache.clear()
+                                
+                                rotated = self.banana_rotation_cache[cache_angle]
+                                rot_rect = rotated.get_rect(center=(cx, cy))
+                                
+                                # Hiệu ứng pulse cho viền (nhấp nháy nhẹ)
+                                pulse = abs(math.sin(self.timer * 3))  # 0 đến 1
+                                
+                                # Vẽ glow effect từ cache (2 layers thay vì 3)
+                                for glow_surf, glow_radius in self.banana_glow_cache:
+                                    self.screen.blit(glow_surf, (cx - glow_radius, cy - glow_radius))
+                                
+                                # Vẽ viền tròn vàng với hiệu ứng pulse
+                                border_radius = small_banana_size // 2 + int(2 + pulse * 2)
+                                border_color = (255, 220 + int(pulse * 35), 0)
+                                
+                                # Vẽ outer glow cho viền (đơn giản hóa)
+                                pygame.draw.circle(self.screen, (255, 235, 100), (int(cx), int(cy)), border_radius + 2, 1)
+                                
+                                # Vẽ viền chính
+                                pygame.draw.circle(self.screen, border_color, (int(cx), int(cy)), border_radius, 2)
+                                
+                                self.screen.blit(rotated, rot_rect.topleft)
+                            else:
+                                # Static image without rotation in performance mode (still has floating)
+                                # Use cached glow if available
+                                if self.banana_glow_cache:
+                                    glow_surf, glow_radius = self.banana_glow_cache[0]
+                                    self.screen.blit(glow_surf, (int(cx) - glow_radius, int(cy) - glow_radius))
+                                
+                                # Viền vàng
+                                border_radius = small_banana_size // 2 + 2
+                                pygame.draw.circle(self.screen, (255, 220, 0), (int(cx), int(cy)), border_radius, 2)
+                                
+                                img_rect = self.small_banana_cache.get_rect(center=(cx, cy))
+                                self.screen.blit(self.small_banana_cache, img_rect.topleft)
+                        except Exception as e:
+                            # Fallback to simple circle (no glow in fallback for performance)
+                            circle_radius = max(5, cell // 4)
+                            pygame.draw.circle(self.screen, (255, 220, 100), (int(cx), int(cy)), circle_radius)
+                            pygame.draw.circle(self.screen, (255, 200, 0), (int(cx), int(cy)), circle_radius + 2, 2)
+                    else:
+                        # Image not loaded - use circle with border (no glow for performance)
+                        circle_radius = max(5, cell // 4)
+                        pygame.draw.circle(self.screen, (255, 220, 100), (int(cx), int(cy)), circle_radius)
+                        pygame.draw.circle(self.screen, (255, 200, 0), (int(cx), int(cy)), circle_radius + 2, 2)
+            
             # draw banana goal - VẼ TRƯỚC walls để đứng sau tường
-            gx = self.maze_rect.x + (MAZE_COLS - 2)*cell + (cell - self.banana.base_image.get_width())//2
-            gy = self.maze_rect.y + (MAZE_ROWS - 2)*cell + (cell - self.banana.base_image.get_height())//2
+            gx = self.maze_rect.x + (maze_cols - 2)*cell + (cell - self.banana.base_image.get_width())//2
+            gy = self.maze_rect.y + (maze_rows - 2)*cell + (cell - self.banana.base_image.get_height())//2
 
             if self.skip_expensive_effects:
                 # Static banana without animation
@@ -1028,8 +2067,8 @@ class App:
                 self.banana.draw(self.screen, (gx, gy))
 
             # draw walls using cached scaled tile - VẼ SAU player và banana để che chúng
-            for r in range(MAZE_ROWS):
-                for c in range(MAZE_COLS):
+            for r in range(maze_rows):
+                for c in range(maze_cols):
                     if self.maze[r][c].status == 0:
                         x = self.maze_rect.x + c*cell; y = self.maze_rect.y + r*cell
                         # Use pre-scaled cached wall tile
@@ -1096,6 +2135,10 @@ class App:
 
         # victory modal
         self.modal_victory.draw(self.screen, self.window_rect, self.font_title, self.font_ui)
+        
+        # game complete modal
+        if self.showing_game_complete:
+            self.modal_game_complete.draw(self.screen, self.window_rect, self.font_title, self.font_ui)
 
     def get_cached_surface(self, key, creator_func):
         """Cache system for expensive surface operations"""
@@ -1234,6 +2277,47 @@ class App:
             return True
         return False
 
+    def draw_transition(self):
+        """Vẽ hiệu ứng chuyển cảnh circle 2 pha"""
+        if not self.transitioning or not self.transition_surface_from or not self.transition_surface_to:
+            return
+        
+        t = self.transition_progress
+        max_radius = int(((self.window_rect.w ** 2 + self.window_rect.h ** 2) ** 0.5) / 2)
+        center = (self.window_rect.w // 2, self.window_rect.h // 2)
+        
+        # Vẽ nền đen
+        self.screen.fill((0, 0, 0))
+        
+        if t < 0.5:
+            # Phase 1: Thu nhỏ màn hình cũ vào giữa
+            phase_t = t * 2  # Map 0.0-0.5 -> 0.0-1.0
+            phase_eased = phase_t * phase_t * (3.0 - 2.0 * phase_t)  # Smoothstep
+            current_radius = int(max_radius * (1 - phase_eased))
+            
+            if current_radius > 0:
+                mask_surface = pygame.Surface((self.window_rect.w, self.window_rect.h))
+                mask_surface.fill((0, 0, 0))
+                pygame.draw.circle(mask_surface, (255, 255, 255), center, current_radius)
+                
+                temp_surface = self.transition_surface_from.copy()
+                temp_surface.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+                self.screen.blit(temp_surface, (0, 0))
+        else:
+            # Phase 2: Mở rộng màn hình mới từ giữa
+            phase_t = (t - 0.5) * 2  # Map 0.5-1.0 -> 0.0-1.0
+            phase_eased = phase_t * phase_t * (3.0 - 2.0 * phase_t)  # Smoothstep
+            current_radius = int(max_radius * phase_eased)
+            
+            if current_radius > 0:
+                mask_surface = pygame.Surface((self.window_rect.w, self.window_rect.h))
+                mask_surface.fill((0, 0, 0))
+                pygame.draw.circle(mask_surface, (255, 255, 255), center, current_radius)
+                
+                temp_surface = self.transition_surface_to.copy()
+                temp_surface.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+                self.screen.blit(temp_surface, (0, 0))
+
     def run(self):
         while self.running:
             # Use adaptive FPS based on performance mode
@@ -1243,7 +2327,10 @@ class App:
             self.handle_events()
             self.update(dt)
 
-            if self.state=="start":
+            # Draw transition or normal screens
+            if self.transitioning:
+                self.draw_transition()
+            elif self.state=="start":
                 self.draw_start()
             else:
                 self.draw_game()
