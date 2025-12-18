@@ -1,180 +1,226 @@
-# 🎮 Monkey's Treasure - Maze Solver Game
+# 🐵 Monkey's Treasure - Maze Solver Game
 
-Trò chơi giải mê cung với AI sử dụng các thuật toán tìm kiếm thông minh.
+Trò chơi giải mê cung với chú khỉ tìm kho báu, sử dụng các thuật toán AI thông minh. Game được phát triển bằng Python và Pygame với giao diện đồ họa hấp dẫn theo phong cách rừng nhiệt đới.
 
 ## 📋 Mục lục
+- [Giới thiệu](#-giới-thiệu)
 - [Tính năng](#-tính-năng)
 - [Cấu trúc dự án](#-cấu-trúc-dự-án)
 - [Cài đặt](#-cài-đặt)
-- [Sử dụng](#-sử-dụng)
-- [Refactoring](#-refactoring)
+- [Hướng dẫn chơi](#-hướng-dẫn-chơi)
+- [Thuật toán](#-thuật-toán)
+- [Tài liệu tham khảo](#-tài-liệu-tham-khảo)
+
+## 🎯 Giới thiệu
+
+**Monkey's Treasure** là game giải mê cung kết hợp giải trí và học thuật. Người chơi điều khiển chú khỉ di chuyển qua các mê cung được sinh ngẫu nhiên để tìm kho báu (quả chuối vàng). Game tích hợp nhiều thuật toán AI để sinh mê cung và tìm đường đi tối ưu.
+
+### Điểm nổi bật
+- 🎮 **3 cấp độ** với độ khó tăng dần
+- 🪙 **Hệ thống xu** thưởng khi hoàn thành nhanh
+- 🤖 **Auto-play** với chi phí xu tăng dần
+- ⏱️ **Giới hạn thời gian** và số bước
+- 🏆 **Mở khóa level** theo tiến trình
 
 ## ✨ Tính năng
 
+### 🎮 Hệ thống Level
+| Level | Kích thước | Thời gian | Bước dư |
+|-------|-----------|-----------|---------|
+| 1 | 13×7 | 30 giây | +10 bước |
+| 2 | 19×13 | 90 giây | +5 bước |
+| 3 | 25×19 | 75 giây | +3 bước |
+
+### 🪙 Hệ thống Xu (Coin)
+- **Nhận xu**: Hoàn thành level với thời gian còn lại > 60% thời gian giới hạn
+- **Chi tiêu xu**: Sử dụng tính năng Auto-play
+- **Chi phí Auto-play**: 
+  - Lần 1: 5 xu
+  - Lần 2: 10 xu  
+  - Lần 3: 15 xu
+  - ... (tăng 5 xu mỗi lần)
+
 ### 🏗️ Thuật toán sinh mê cung
 - **DFS** (Depth-First Search) - Sinh mê cung theo chiều sâu
-- **Kruskal** - Sử dụng Union-Find
-- **Binary Tree** - Mê cung có cấu trúc cây
-- **Wilson** - Random walk algorithm
-- **Recursive Division** - Chia đệ quy
+- **Kruskal** - Sử dụng cấu trúc Union-Find
+- **Binary Tree** - Mê cung có cấu trúc cây nhị phân
+- **Wilson** - Thuật toán random walk
+- **Recursive Division** - Chia đệ quy tạo tường
 
 ### 🎯 Thuật toán giải mê cung
 - **BFS** (Breadth-First Search) - Tìm đường đi ngắn nhất
-- **DFS** (Depth-First Search) - Tìm đường đi
-- **UCS** (Uniform Cost Search) - Chi phí đồng nhất
-- **A*** (A-Star) - Tối ưu với heuristic
-- **Bidirectional Search** - Tìm từ 2 đầu
+- **DFS** (Depth-First Search) - Tìm đường theo chiều sâu
+- **UCS** (Uniform Cost Search) - Tìm kiếm chi phí đồng nhất
+- **A*** (A-Star) - Tối ưu với heuristic Manhattan
+- **Bidirectional Search** - Tìm kiếm hai chiều
 
 ### 🎨 Giao diện
-- Thiết kế hiện đại với glassmorphism
-- Animation mượt mà
-- Responsive UI
-- Performance optimization
+- Thiết kế jungle theme với đồ họa sinh động
+- Hiệu ứng particle cho chiến thắng/thất bại
+- Animation mượt mà với FPS tối ưu
+- Glassmorphism UI hiện đại
+- Responsive với chế độ fullscreen
 
 ## 📁 Cấu trúc dự án
 
 ```
 MazeSolverGame/
-├── main.py                 # Entry point
-├── config.py              # Configuration
-├── test_refactoring.py    # Test suite
-├── REFACTORING_GUIDE.md   # Chi tiết refactoring
+├── main.py                    # Entry point - Khởi chạy game
+├── config.py                  # Cấu hình game (constants, settings)
+├── BÁO_CÁO_ĐỒ_ÁN.md          # Báo cáo chi tiết đồ án
 │
-├── Model/                 # Data & Logic
-│   ├── node_cell.py      # Cell class
-│   ├── maze_generator.py # Generation algorithms
-│   └── maze_solver.py    # Solving algorithms
+├── Model/                     # Tầng Model - Dữ liệu & Logic
+│   ├── __init__.py           # Export các model
+│   ├── node_cell.py          # Class Cell cho ô mê cung
+│   ├── maze_generator.py     # Các thuật toán sinh mê cung
+│   └── maze_solver.py        # Các thuật toán giải mê cung
 │
-├── View/                  # UI & Display
-│   ├── __init__.py       # Main App
-│   ├── utils.py          # Utilities
-│   ├── components/       # UI components
-│   ├── sprites/          # Game sprites
-│   └── assets/           # Images, fonts
+├── View/                      # Tầng View - Giao diện người dùng
+│   ├── __init__.py           # Class App chính (game logic)
+│   ├── utils.py              # Hàm tiện ích (load image, draw,...)
+│   ├── particle.py           # Hệ thống particle effects
+│   │
+│   ├── components/           # UI Components
+│   │   ├── button.py         # Component Button
+│   │   ├── dropdown.py       # Component Dropdown menu
+│   │   ├── modals.py         # Modal History & Victory
+│   │   └── level_modals.py   # Modal Level Select & Game Complete
+│   │
+│   ├── sprites/              # Game sprites
+│   │   └── __init__.py       # FloatingBanana, MonkeyIdle
+│   │
+│   └── assets/               # Tài nguyên đồ họa
+│       ├── bg_jungle.png     # Background gameplay
+│       ├── bg_start.png      # Background menu
+│       ├── monkey.png        # Sprite khỉ
+│       ├── banana_rainbow.png # Sprite chuối (đích)
+│       ├── tile_wall.png     # Texture tường
+│       ├── button/           # Hình ảnh các nút
+│       ├── box/              # UI boxes (time, step, algo)
+│       ├── tiles/            # Floor tiles
+│       └── monkey_stand/     # Idle animation frames
 │
-└── Controller/            # Game logic (TODO)
+└── Controller/                # Tầng Controller
+    ├── __init__.py
+    └── game_controller.py    # Xử lý input & game flow
 ```
 
 ## 🔧 Cài đặt
 
-### Yêu cầu
-- Python 3.9+
-- Pygame 2.0+
+### Yêu cầu hệ thống
+- **Python**: 3.9 trở lên
+- **Pygame**: 2.0 trở lên
+- **RAM**: 512MB+
+- **Màn hình**: 1024x768 trở lên
 
 ### Cài đặt dependencies
 ```bash
 pip install pygame
 ```
 
-### Clone repository
+### Clone và chạy
 ```bash
-git clone https://github.com/ntquang-0410/MazeSolverGame.git
-cd MazeSolverGame
-```
+# Clone từ GitHub
+git clone https://github.com/SolosamH/ITproject.git
+cd ITproject/MazeSolverGame
 
-## 🚀 Sử dụng
-
-### Chạy game
-```bash
+# Chạy game
 python main.py
 ```
 
-### Chạy tests
-```bash
-python test_refactoring.py
+## 🎮 Hướng dẫn chơi
+
+### Điều khiển
+| Phím | Chức năng |
+|------|-----------|
+| ↑ / W | Di chuyển lên |
+| ↓ / S | Di chuyển xuống |
+| ← / A | Di chuyển trái |
+| → / D | Di chuyển phải |
+| ESC | Quay lại menu |
+
+### Luật chơi
+1. **Mục tiêu**: Điều khiển khỉ đến quả chuối vàng
+2. **Thời gian**: Hoàn thành trước khi hết giờ
+3. **Số bước**: Không vượt quá giới hạn cho phép
+4. **Mở khóa**: Hoàn thành level trước để mở level sau
+5. **Thưởng xu**: Hoàn thành nhanh (>60% thời gian còn lại) được thưởng xu
+
+### Tính năng Auto-play
+- Nhấn nút **Auto** để AI tự động giải mê cung
+- Chi phí xu tăng theo số lần sử dụng
+- Hữu ích khi bị kẹt hoặc muốn xem đường đi tối ưu
+
+## 🧠 Thuật toán
+
+### Sinh mê cung
+| Thuật toán | Đặc điểm | Độ phức tạp |
+|------------|----------|-------------|
+| DFS | Đường đi dài, ít rẽ nhánh | O(V + E) |
+| Kruskal | Phân bố đều, nhiều ngã rẽ | O(E log E) |
+| Binary Tree | Đơn giản, bias về góc | O(V) |
+| Wilson | Hoàn toàn ngẫu nhiên | O(V²) trung bình |
+| Recursive Division | Cấu trúc phòng, đường thẳng | O(V log V) |
+
+### Giải mê cung
+| Thuật toán | Đặc điểm | Tối ưu | Độ phức tạp |
+|------------|----------|--------|-------------|
+| BFS | Tìm đường ngắn nhất | ✅ | O(V + E) |
+| DFS | Nhanh, không tối ưu | ❌ | O(V + E) |
+| UCS | Chi phí đồng nhất | ✅ | O(V + E log V) |
+| A* | Heuristic Manhattan | ✅ | O(E) |
+| Bidirectional | Tìm từ 2 đầu | ✅ | O(b^(d/2)) |
+
+### Hiệu năng thực tế (mê cung 25×19)
+```
+BFS:           ~0.010s | Nodes: ~500
+DFS:           ~0.008s | Nodes: ~300
+UCS:           ~0.012s | Nodes: ~450
+A*:            ~0.007s | Nodes: ~200 (nhanh nhất)
+Bidirectional: ~0.009s | Nodes: ~350
 ```
 
-### Sử dụng như thư viện
+## 📊 Screenshots
 
-```python
-from Model import GenerationModel, SolvingModel
+### Màn hình chính
+- Menu Start với animation khỉ idle
+- Background rừng nhiệt đới
 
-# Generate maze
-generator = GenerationModel(25, 19, "DFS")
-maze = generator.generate_maze()
+### Gameplay
+- Mê cung với texture tiles
+- Sidebar hiển thị thông tin (time, steps, coins)
+- Dropdown chọn thuật toán
 
-# Solve maze
-solver = SolvingModel(maze, 25, 19)
-solver.start_pos = generator.start_pos
-solver.end_pos = generator.end_pos
-found = solver.solve_maze("A*")
+### Kết thúc game
+- Modal Victory với confetti effect
+- Modal Game Over khi hết thời gian/bước
+- Modal hoàn thành tất cả level
 
-print(f"Path found: {found}")
-print(f"Path length: {solver.path_length}")
-print(f"Time: {solver.solving_time:.3f}s")
-print(f"Nodes expanded: {solver.nodes_expanded}")
-```
+## 🛠️ Công nghệ sử dụng
 
-## 🔄 Refactoring
-
-Dự án đã được tổ chức lại theo mô hình **MVC (Model-View-Controller)**.
-
-### ✅ Hoàn thành
-- ✅ Tách Model thành các file riêng
-- ✅ Tạo config.py cho constants
-- ✅ Tách View utilities
-- ✅ Tạo Button component
-- ✅ Cấu trúc thư mục rõ ràng
-- ✅ Test suite đầy đủ
-- ✅ Documentation chi tiết
-
-### 📝 TODO
-- Tách các components còn lại (Dropdown, Modals)
-- Tách sprites (Monkey, Banana)
-- Xây dựng Controller layer
-- Cập nhật View/__init__.py
-
-Chi tiết xem [REFACTORING_GUIDE.md](REFACTORING_GUIDE.md)
-
-## 📊 Performance
-
-### Thời gian giải mê cung (25x19)
-- BFS: ~0.010s
-- DFS: ~0.008s
-- UCS: ~0.012s
-- A*: ~0.007s (nhanh nhất)
-- Bidirectional: ~0.009s
-
-## 🤝 Contributing
-
-1. Fork the project
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 📝 Git Commits
-
-### Recent commits
-```bash
-git log --oneline -5
-```
-
-```
-4901ee9 test: Add comprehensive test suite for refactored code
-a4301c3 docs: Add refactoring guide and package init files
-4e52ddc Refactor: Reorganize code structure following MVC pattern
-95f9180 Save current changes before merge
-...
-```
+- **Python 3.13** - Ngôn ngữ lập trình
+- **Pygame 2.6** - Framework game 2D
+- **MVC Pattern** - Kiến trúc phần mềm
+- **Git** - Quản lý phiên bản
 
 ## 📜 License
 
-Dự án học tập - AI Course Project
+Dự án học tập - Môn Trí tuệ nhân tạo
 
-## 👥 Team
+## 👥 Thông tin
 
-- **Repository**: [ntquang-0410/MazeSolverGame](https://github.com/ntquang-0410/MazeSolverGame)
-- **Branch**: view_01
-- **Refactored**: October 2025
+- **Repository**: [SolosamH/ITproject](https://github.com/SolosamH/ITproject)
+- **Ngôn ngữ**: Python
+- **Framework**: Pygame
+- **Cập nhật**: Tháng 12/2025
 
-## 📚 References
+## 📚 Tài liệu tham khảo
 
-- [Maze Generation Algorithms](https://en.wikipedia.org/wiki/Maze_generation_algorithm)
-- [Pathfinding Algorithms](https://en.wikipedia.org/wiki/Pathfinding)
-- [MVC Pattern](https://en.wikipedia.org/wiki/Model–view–controller)
+- [Maze Generation Algorithms - Wikipedia](https://en.wikipedia.org/wiki/Maze_generation_algorithm)
+- [A* Search Algorithm - Wikipedia](https://en.wikipedia.org/wiki/A*_search_algorithm)
 - [Pygame Documentation](https://www.pygame.org/docs/)
+- [Python Documentation](https://docs.python.org/3/)
 
 ---
 
-**Note**: Đây là phiên bản đã được refactor. Code cũ được backup trong các file `.backup`.
+**🎮 Chúc bạn chơi game vui vẻ!**
